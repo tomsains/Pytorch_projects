@@ -1,103 +1,104 @@
-import torch
-import torch.nn as nn
-import torch.nn.functional as F 
 import yfinance as yf
 import pandas as pd
-import matplotlib.pyplot as plt
+import numpy as np
+import torch
+import torch.nn as nn
 from sklearn.preprocessing import MinMaxScaler
-import numpy as np 
+import matplotlib.pyplot as plt
 
+# Step 1: Download Tesla stock data
+ticker = 'TSLA'
+data = yf.download(ticker, start='2010-01-01', end='2023-01-01')
 
-data = yf.download("TSLA", start="2020-01-01", end="2024-07-28", interval="1d")
-print(data.head())
+date = data.index
+data = data[['Close']]
 
+plt.plot(date, data)
+plt.show()
 
+# Step 2: Prepare the data
+scaler = MinMaxScaler(feature_range=(0, 1))
+scaled_data = scaler.fit_transform(data)
 
-df1=pd.DataFrame(data)
+# Create sequences
+def create_sequences(data, seq_length):
+    xs, ys = [], []
+    for i in range(len(data) - seq_length):
+        x = data[i:i+seq_length]
+        y = data[i+seq_length]
+        xs.append(x)
+        ys.append(y)
+    return np.array(xs), np.array(ys)
 
-price = df1[['Close']]
-scaler = MinMaxScaler(feature_range=(-1, 1))
-price['Close'] = scaler.fit_transform(price['Close'].values.reshape(-1,1))
+SEQ_LENGTH = 60
+X, y = create_sequences(scaled_data, SEQ_LENGTH)
 
+# Split the data
+split_idx = int(len(X) * 0.8)
+X_train, X_test = X[:split_idx], X[split_idx:]
+y_train, y_test = y[:split_idx], y[split_idx:]
 
-def split_data(stock, lookback):
-    data_raw = stock.to_numpy() # convert to numpy array
-    data = []
-    
-    # create all possible sequences of length seq_len
-    for index in range(len(data_raw) - lookback): 
-        data.append(data_raw[index: index + lookback])
-    
-    data = np.array(data);
-    test_set_size = int(np.round(0.2*data.shape[0]));
-    train_set_size = data.shape[0] - (test_set_size);
-    
-    x_train = data[:train_set_size,:-1,:]
-    y_train = data[:train_set_size,-1,:]
-    
-    x_test = data[train_set_size:,:-1]
-    y_test = data[train_set_size:,-1,:]
-    
-    return [x_train, y_train, x_test, y_test]
-lookback = 20 # choose sequence length
-x_train, y_train, x_test, y_test = split_data(price, lookback)
+# Convert to PyTorch tensors
+X_train = torch.tensor(X_train, dtype=torch.float32)
+X_test = torch.tensor(X_test, dtype=torch.float32)
+y_train = torch.tensor(y_train, dtype=torch.float32)
+y_test = torch.tensor(y_test, dtype=torch.float32)
 
-print('x_train.shape = ',x_train.shape)
-print('y_train.shape = ',y_train.shape)
-print('x_test.shape = ',x_test.shape)
-print('y_test.shape = ',y_test.shape)
-
-
-x_train = torch.from_numpy(x_train).type(torch.Tensor)
-x_test = torch.from_numpy(x_test).type(torch.Tensor)
-y_train_lstm = torch.from_numpy(y_train).type(torch.Tensor)
-y_test_lstm = torch.from_numpy(y_test).type(torch.Tensor)
-y_train_gru = torch.from_numpy(y_train).type(torch.Tensor)
-y_test_gru = torch.from_numpy(y_test).type(torch.Tensor)
-
-
-
-input_dim = 1
-hidden_dim = 32
-num_layers = 2
-output_dim = 1
-num_epochs = 100
-
-# Here we define our model as a class
+# Step 3: Define the LSTM model
 class LSTM(nn.Module):
-    def __init__(self, input_dim, hidden_dim, num_layers, output_dim):
+    def __init__(self, input_size=1, hidden_layer_size=100, output_size=1):
         super(LSTM, self).__init__()
-        self.hidden_dim = hidden_dim
-        self.num_layers = num_layers
-        
-        self.lstm = nn.LSTM(input_dim, hidden_dim, num_layers, batch_first=True)
-        self.fc = nn.Linear(hidden_dim, output_dim)
-    def forward(self, x):
-        h0 = torch.zeros(self.num_layers, x.size(0), self.hidden_dim).requires_grad_()
-        c0 = torch.zeros(self.num_layers, x.size(0), self.hidden_dim).requires_grad_()
-        out, (hn, cn) = self.lstm(x, (h0.detach(), c0.detach()))
-        out = self.fc(out[:, -1, :]) 
-        return out
-        # out.size() --> 100, 10
-      
-    
-model = LSTM(input_dim=input_dim, hidden_dim=hidden_dim, output_dim=output_dim, num_layers=num_layers)
-criterion = torch.nn.MSELoss(reduction='mean')
-optimiser = torch.optim.Adam(model.parameters(), lr=0.01)
+        self.hidden_layer_size = hidden_layer_size
+        self.lstm = nn.LSTM(input_size, hidden_layer_size)
+        self.linear = nn.Linear(hidden_layer_size, output_size)
+        self.hidden_cell = (torch.zeros(1,1,self.hidden_layer_size),
+                            torch.zeros(1,1,self.hidden_layer_size))
 
+    def forward(self, input_seq):
+        lstm_out, self.hidden_cell = self.lstm(input_seq.view(len(input_seq) ,1, -1), self.hidden_cell)
+        predictions = self.linear(lstm_out.view(len(input_seq), -1))
+        return predictions[-1]
 
-import time
-hist = np.zeros(num_epochs)
-start_time = time.time()
-lstm = []
-for t in range(num_epochs):
-    y_train_pred = model(x_train)
-    loss = criterion(y_train_pred, y_train_lstm)
-    print("Epoch ", t, "MSE: ", loss.item())
-    hist[t] = loss.item()
-    optimiser.zero_grad()
-    loss.backward()
-    optimiser.step()
-    
-training_time = time.time()-start_time
-print("Training time: {}".format(training_time))
+# Instantiate the model, define the loss function and the optimizer
+model = LSTM()
+loss_function = nn.MSELoss()
+optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
+
+# Step 4: Train the model
+epochs = 100
+for i in range(epochs):
+    for seq, labels in zip(X_train, y_train):
+        optimizer.zero_grad()
+        model.hidden_cell = (torch.zeros(1, 1, model.hidden_layer_size),
+                        torch.zeros(1, 1, model.hidden_layer_size))
+
+        y_pred = model(seq)
+
+        single_loss = loss_function(y_pred, labels)
+        single_loss.backward()
+        optimizer.step()
+
+    if i % 2 == 1:
+        print(f'Epoch {i} loss: {single_loss.item()}')
+
+print(f'Epoch {epochs} loss: {single_loss.item()}')
+
+# Step 5: Make predictions
+model.eval()
+with torch.no_grad():
+    test_predictions = []
+    for seq in X_test:
+        model.hidden_cell = (torch.zeros(1, 1, model.hidden_layer_size),
+                            torch.zeros(1, 1, model.hidden_layer_size))
+        test_predictions.append(model(seq).item())
+
+# Step 6: Inverse transform the predictions to original scale
+test_predictions = scaler.inverse_transform(np.array(test_predictions).reshape(-1, 1))
+y_test = scaler.inverse_transform(y_test.reshape(-1, 1))
+
+# Evaluate the model
+plt.figure(figsize=(10,6))
+plt.plot(data.index[-len(y_test):], y_test, label='Actual Prices')
+plt.plot(data.index[-len(test_predictions):], test_predictions, label='Predicted Prices')
+plt.legend()
+plt.show()
